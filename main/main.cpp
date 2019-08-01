@@ -13,6 +13,13 @@
 #include "freertos/FreeRTOS.h"
 #include "esp_event.h"
 #include "nvs_flash.h"
+#include <freertos/task.h>
+#include <esp_system.h>
+#include <bmp280.h>
+
+#define SDA_GPIO GPIO_NUM_21
+#define SCL_GPIO GPIO_NUM_22
+
 
 #include "TheThingsNetwork.h"
 
@@ -28,13 +35,6 @@ const char *devEui = "0007f0000a7c5ac4";
 const char *appEui = "0000000000000005";
 const char *appKey = "10101010101010101010101010101010";
 
-#define SDA_PIN GPIO_NUM_21
-#define SCL_PIN GPIO_NUM_22
-
-#define TAG_BME280 "BME280"
-
-#define I2C_MASTER_ACK 0
-#define I2C_MASTER_NACK 1
 
 // Pins and other resources
 #define TTN_SPI_HOST      HSPI_HOST
@@ -52,7 +52,60 @@ static TheThingsNetwork ttn;
 
 const unsigned TX_INTERVAL = 30;
 SemaphoreHandle_t xSemaphore = NULL;
-static uint8_t msgData[] = "Hello, world";
+static uint8_t msgData[40]="Messaggio vuoto";
+
+void bmp280_test(void *pvParamters)
+{
+    bmp280_params_t params;
+    bmp280_init_default_params(&params);
+    bmp280_t dev;
+
+    esp_err_t res;
+
+    while (i2cdev_init() != ESP_OK)
+    {
+        printf("Could not init I2Cdev library\n");
+        vTaskDelay(250 / portTICK_PERIOD_MS);
+    }
+
+    while (bmp280_init_desc(&dev, BMP280_I2C_ADDRESS_1, I2C_NUM_0, SDA_GPIO, SCL_GPIO) != ESP_OK)
+    {
+        printf("Could not init device descriptor\n");
+        vTaskDelay(250 / portTICK_PERIOD_MS);
+    }
+
+    while ((res = bmp280_init(&dev, &params)) != ESP_OK)
+    {
+        printf("Could not init BMP280, err: %d\n", res);
+        vTaskDelay(250 / portTICK_PERIOD_MS);
+    }
+
+    bool bme280p = dev.id == BME280_CHIP_ID;
+    printf("BMP280: found %s\n", bme280p ? "BME280" : "BMP280");
+
+    float pressure, temperature, humidity;
+
+    while (1)
+    {
+	int b = 0; 
+        int e = 0;
+	int pa = 0;
+        vTaskDelay(TX_INTERVAL * 1000/ portTICK_PERIOD_MS);
+        if (bmp280_read_float(&dev, &temperature, &pressure, &humidity) != ESP_OK)
+        {
+            printf("Temperature/pressure reading failed\n");
+            continue;
+        }
+
+        printf("Pressure: %.2f Pa, Temperature: %.2f C", pressure, temperature);
+	sprintf((char*)msgData,"|%.2f|%.2f|0.00|%i|%i|%i",temperature,pressure,b,e,pa);
+        if (bme280p)
+            printf(", Humidity: %.2f\n", humidity);
+        else
+            printf("\n");
+    }
+}
+
 
 
 void sendMessages(void* pvParameter)
@@ -61,7 +114,7 @@ void sendMessages(void* pvParameter)
         printf("Sending message...\n");
         TTNResponseCode res = ttn.transmitMessage(msgData, sizeof(msgData) - 1);
         printf(res == kTTNSuccessfulTransmission ? "Message sent.\n" : "Transmission failed.\n");
-
+        xTaskCreate(bmp280_test, "bmp280_test", 1024 * 4, (void* )0, 3, NULL);
         vTaskDelay(TX_INTERVAL * 1000 / portTICK_PERIOD_MS);
     }
 }
@@ -102,8 +155,10 @@ extern "C" void app_main(void)
     ttn.provision(devEui, appEui, appKey);
 
     ttn.onMessage(messageReceived);
+    
 
     printf("Joining...\n");
+    xTaskCreate(bmp280_test, "bmp280_test", 1024 * 4, (void* )0, 3, NULL);
     if (ttn.join())
     {
         printf("Joined.\n");
